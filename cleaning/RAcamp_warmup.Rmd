@@ -1,0 +1,165 @@
+---
+title: "RAcamp_warmup"
+author: "藤原慶斗"
+output:
+  pdf_document:
+    latex_engine: xelatex
+mainfont: Osaka
+---
+
+# データ整理と変換
+```{r setup}
+pacman::p_load(tidyverse, readxl, psych, estimatr)
+
+#メインのディレクトリを設定
+data_dir = "/Users/fujiwarakeito/Documents/OSIPP2024/2024年度RAブートキャンプ/ra-bootcamp-warmup/warmup training package/01_data/raw"
+```
+
+
+## (a) Semester Dataの整形
+```{r}
+#データ読み込み
+file_path_data1 = file.path(data_dir, "semester_dummy/semester_data_1.csv")
+semdumm1 = read.csv(file_path_data1)
+file_path_data2 = file.path(data_dir, "semester_dummy/semester_data_2.csv")
+semdumm2 = read.csv(file_path_data2)
+
+#結合
+colnames = semdumm1[1,] #列名を保存
+semdum_bind = rbind(semdumm1[2:nrow(semdumm1),],semdumm2) #列名を除いて結合
+colnames(semdum_bind) = colnames #列名をつける
+head(semdum_bind)
+
+#Yを削除
+semdums = semdum_bind %>%
+  select(-Y)  #Yを削除
+head(semdums)
+
+#semester制が導入された年の列を作成
+semdums = semdums %>%
+  mutate(start_year_sem = 
+           if_else(semester == 1 & lag(semester) == 0, 1, 0)) %>% #semester開始ダミーを作成
+  mutate(sem_start = ifelse(start_year_sem == 1, year,0)) 
+
+#semester制導入後を示すダミー変数を作成
+semdums = semdums %>%
+  group_by(instnm) %>% 
+  mutate(int = sum(start_year_sem)) %>% #semesterを導入したかを示すダミーを作成
+  ungroup %>%
+  mutate(int_sem = ifelse(int == 1, semester, 0 ))
+  view(semdums)
+```
+
+
+## (b) Gradrate Dataの整形
+```{r}
+setwd("/Users/fujiwarakeito/Documents/OSIPP2024/2024年度RAブートキャンプ/ra-bootcamp-warmup/warmup training package/01_data/raw/outcome")
+file_path_data3 = file.path(data_dir,"outcome")
+file_list = list.files(file_path_data3)
+
+grad = data_frame()
+for (data in file_list){
+  grad_read = read_xlsx(data)
+  grad = bind_rows(grad,grad_read)
+}
+
+#女子学生の4年卒業率を0から1のスケールに
+grad$women_gradrate_4yr = grad$women_gradrate_4yr * 0.01
+
+#データの型を変更
+grad$totcohortsize = as.numeric(grad$totcohortsize)
+grad$m_4yrgrads = as.numeric(grad$m_4yrgrads)
+
+#男女合計の4年卒業率と男子学生の4年卒業率を追加
+grad = grad %>%
+  mutate(men_gradrate_4yr = m_4yrgrads/m_cohortsize) %>%
+  mutate(total_gradrate_4yr = tot4yrgrads/totcohortsize)
+summary(grad)
+
+#卒業率を有効数字3桁に調整
+grad$women_gradrate_4yr = format(grad$women_gradrate_4yr,3)
+grad$men_gradrate_4yr = format(grad$men_gradrate_4yr,3)
+grad$total_gradrate_4yr = format(grad$total_gradrate_4yr,3)
+
+#1991年から2010年までのデータフレームに変形
+grad = grad %>% 
+  filter(year >= 1991 & year <= 2010)
+```
+
+## (c) Covariates Dataの整形
+```{r}
+file_path_data4 = file.path(data_dir,"covariates/covariates.xlsx")
+cov = read_xlsx(file_path_data4)
+
+#列名の変更
+colnames(cov)[1] = "unitid"
+head(cov)
+
+#文字を削除
+cov$unitid = str_replace(cov$unitid, "aaaa", "")
+
+#wide型に変更
+cov = cov %>%
+  pivot_wider(names_from = "category",
+  values_from = "value")
+
+#期間を他のデータに揃える
+cov$year = as.numeric(cov$year) #データの型を変更
+cov = cov %>%
+  filter(year >= 1991 & year <= 2010)
+summary(cov)
+cov$unitid = as.numeric(cov$unitid)
+```
+
+## (d) Master Dataの作成
+```{r}
+semdums = sapply(semdums, as.numeric) #データの型を変更
+semdums = as.data.frame(semdums)
+
+#データを結合
+semdums$unitid = as.numeric(semdums$unitid) #セメスターデータのunitidもoutcomeデータに合わせる
+
+mdata = left_join(semdums,grad, by = c("unitid","year"))
+mdata = left_join(mdata,cov, by = c("unitid","year"))
+```
+
+# 分析
+## (a) 記述統計
+```{r}
+mdata = sapply(mdata, as.numeric) #データの型を変更
+mdata = as.data.frame(mdata)
+
+#NAの数
+summary(mdata)
+
+#記述統計を作成
+describe(mdata)
+
+#4年卒業率の平均推移
+mdata %>% 
+  group_by(year) %>%
+  summarise(avegradrate = mean(total_gradrate_4yr)) %>%
+  ungroup() %>%
+  ggplot(aes(year, avegradrate)) + geom_point() + geom_line() +
+  scale_y_continuous(breaks=seq(0.2, 0.45,length=0.05),limits=c(0.2, 0.45))
+
+#semester導入率
+mdata %>% 
+  group_by(year) %>%
+  summarise(avesem = mean(semester)) %>%
+  ungroup() %>%
+  ggplot(aes(year, avesem)) + geom_point() + geom_line() +
+  scale_y_continuous(breaks=seq(0.8, 1,length=0.05),limits=c(0.8, 1))
+
+
+
+```
+
+
+(b) 回帰分析
+```{r}
+model = lm_robust(total_gradrate_4yr ~ int_sem, data = mdata)
+summary(model)
+
+head(mdata)
+```
